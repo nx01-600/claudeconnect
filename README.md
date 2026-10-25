@@ -22,14 +22,26 @@ permissions.
 
 ## Install
 
-Requires [Rust](https://rustup.rs) and Claude Code.
+Easiest: paste this into any Claude Code session and let it do everything:
 
-```sh
-cargo install --git https://github.com/nx01-600/claudeconnect
-claudeconnect install
+```text
+Install claudeconnect for me following https://github.com/nx01-600/claudeconnect/blob/main/docs/INSTALL.md
 ```
 
-`install` registers the `claudeconnect` MCP server for your user and adds `/connect:*` slash commands.
+Or install it yourself, no Rust needed:
+
+```powershell
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/nx01-600/claudeconnect/main/install.ps1 | iex
+claudeconnect firewall   # once, asks for admin: lets direct connections in
+```
+
+```sh
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/nx01-600/claudeconnect/main/install.sh | sh
+```
+
+Building from source, uninstalling, and Windows toolchain notes: [docs/INSTALL.md](docs/INSTALL.md).
 
 ## Use
 
@@ -37,7 +49,7 @@ Start Claude Code through the launcher (extra arguments go straight to `claude`)
 
 ```sh
 claudeconnect claude
-claudeconnect claude --name nico-api --dangerously-skip-permissions
+claudeconnect claude --dangerously-skip-permissions --continue --name nico-api
 ```
 
 Channels, the Claude Code feature that lets claudeconnect push messages into a running session,
@@ -88,6 +100,16 @@ Each peer gets its own settings, stored per machine in `~/.claudeconnect/peers.j
 Every project gets a `.claudeconnect/` folder with `journal.jsonl` (everything sent and received)
 and `files/` (received attachments). It is added to `.git/info/exclude` automatically. Turn it off
 with the `journal` tool.
+
+## Security notes
+
+- Only information travels. Attachments can only be files inside the current project.
+- New peers start `untrusted` with `delegate=manual`. Manual approval is a real dialog you answer;
+  if your Claude Code client can't show it, the delegation is declined instead of left to the model.
+- `~/.claudeconnect/rooms.json` stores room secrets in plain text, like SSH keys in your profile:
+  anyone with access to your user account can rejoin those rooms.
+- A session only creates its identity (`~/.claudeconnect/sessions/`) the first time it uses a
+  claudeconnect tool.
 
 ## How it works
 

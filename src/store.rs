@@ -242,9 +242,16 @@ pub fn save_room(id: &str, rec: RoomRecord) -> anyhow::Result<()> {
 }
 
 /// Heartbeat file other tools (like a status line) read to show this session's state.
-pub fn write_live(name: &str, v: &Value) {
-    let path = home().join("live").join(format!("{}.json", slug(name)));
-    let _ = write_json(&path, v);
+/// One file per process; files from dead processes are cleared on the next write.
+pub fn write_live(v: &Value) {
+    let dir = home().join("live");
+    let _ = write_json(&dir.join(format!("{}.json", std::process::id())), v);
+    for e in fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let stale = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 60);
+        if stale {
+            let _ = fs::remove_file(e.path());
+        }
+    }
 }
 
 // ---------- project journal ----------

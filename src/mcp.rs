@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use anyhow::{Context, anyhow};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{Mutex, OnceCell, oneshot};
 
 use crate::envelope::{Attachment, Envelope, KINDS, Member, Ticket};
 use crate::net::{Event, Net};
@@ -31,7 +31,9 @@ While in a room: call set_status when you start or finish a meaningful task, cal
 #[derive(Clone)]
 struct App {
     out: Arc<Mutex<tokio::io::Stdout>>,
-    net: Net,
+    /// Started on first use, so sessions that never touch claudeconnect stay offline
+    /// and don't create an identity.
+    net: Arc<OnceCell<Net>>,
     can_elicit: Arc<AtomicBool>,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     next_id: Arc<AtomicI64>,
@@ -39,11 +41,9 @@ struct App {
 }
 
 pub async fn run() -> anyhow::Result<()> {
-    let id = store::load_identity()?;
-    let (net, mut events) = Net::start(id.key.clone(), id.me.clone()).await?;
     let app = App {
         out: Arc::new(Mutex::new(tokio::io::stdout())),
-        net,
+        net: Default::default(),
         can_elicit: Default::default(),
         pending: Default::default(),
         next_id: Default::default(),
@@ -56,19 +56,12 @@ pub async fn run() -> anyhow::Result<()> {
         let channel = std::env::var("CLAUDECONNECT_CHANNEL").is_ok();
         let project = store::project_dir().to_string_lossy().to_string();
         loop {
-            let rooms: Vec<Value> = hb.net.rooms.lock().await.values().map(|r| json!({"name": r.name, "peers": r.peers.len()})).collect();
-            let v = json!({"name": hb.net.me.name, "project": project, "channel": channel, "rooms": rooms, "ts": store::now()});
-            store::write_live(&hb.net.me.name, &v);
+            let (name, rooms) = match hb.net.get() {
+                Some(net) => (net.me.name.clone(), net.rooms.lock().await.values().map(|r| json!({"name": r.name, "peers": r.peers.len()})).collect()),
+                None => (String::new(), vec![]),
+            };
+            store::write_live(&json!({"name": name, "project": project, "channel": channel, "rooms": rooms, "ts": store::now()}));
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        }
-    });
-
-    let ev = app.clone();
-    tokio::spawn(async move {
-        while let Some(e) = events.recv().await {
-            let app = ev.clone();
-            // Own task: a manual-approval dialog must not hold up other messages.
-            tokio::spawn(async move { app.on_event(e).await });
         }
     });
 
@@ -118,6 +111,32 @@ pub async fn run() -> anyhow::Result<()> {
 }
 
 impl App {
+    /// The network, starting it (identity + iroh endpoint) on first use.
+    async fn net(&self) -> anyhow::Result<&Net> {
+        self.net
+            .get_or_try_init(|| async {
+                let id = store::load_identity()?;
+                let (net, mut events) = Net::start(id.key.clone(), id.me.clone()).await?;
+                // The identity lock lives as long as the process.
+                std::mem::forget(id);
+                let app = self.clone();
+                tokio::spawn(async move {
+                    while let Some(e) = events.recv().await {
+                        let app = app.clone();
+                        // Own task: a manual-approval dialog must not hold up other messages.
+                        tokio::spawn(async move { app.on_event(e).await });
+                    }
+                });
+                anyhow::Ok(net)
+            })
+            .await
+    }
+
+    /// The network where it must already be running (events and replies only exist after start).
+    fn n(&self) -> &Net {
+        self.net.get().expect("network started")
+    }
+
     async fn write(&self, v: Value) {
         let mut o = self.out.lock().await;
         let _ = o.write_all(format!("{v}\n").as_bytes()).await;
@@ -214,7 +233,13 @@ impl App {
                         self.reply(&env, "Declined by the user.").await;
                         return Ok(());
                     }
-                    Err(_) => "The user has NOT approved this yet: ask them with AskUserQuestion before starting.",
+                    Err(_) => {
+                        // Without a real dialog the model would be the only gate, so refuse instead.
+                        self.reply(&env, "Declined: this session can't show approval dialogs, and delegation from you needs manual approval.").await;
+                        self.push(format!("Declined a delegation from {who}: manual approval needs a dialog this client can't show. To accept delegations from this peer, set delegate=auto from a terminal (`claudeconnect perm {} delegate=auto trust=trusted`).
+{}", short(&env.from.session_id), env.text), meta(&env, &perms)).await;
+                        return Ok(());
+                    }
                 },
                 Delegate::Auto => "Delegation is set to automatic for this peer.",
             };
@@ -237,14 +262,14 @@ impl App {
         env.to = Some(to.from.session_id.clone());
         env.reply_to = Some(to.id.clone());
         store::journal(journal_entry("out", &env, &[], false));
-        let _ = self.net.send(&env).await;
+        let _ = self.n().send(&env).await;
     }
 
     fn envelope(&self, room: &str, kind: &str, text: String) -> Envelope {
         Envelope {
             id: store::random_hex(6),
             room: room.into(),
-            from: self.net.me.clone(),
+            from: self.n().me.clone(),
             to: None,
             ts: store::now(),
             kind: kind.into(),
@@ -256,7 +281,7 @@ impl App {
     }
 
     async fn room_id(&self, arg: &Value) -> anyhow::Result<String> {
-        let rooms = self.net.rooms.lock().await;
+        let rooms = self.n().rooms.lock().await;
         if let Some(q) = arg.as_str().filter(|s| !s.is_empty()) {
             return rooms.iter().find(|(id, r)| id.as_str() == q || r.name == q).map(|(id, _)| id.clone()).ok_or_else(|| anyhow!("not in a room called {q}"));
         }
@@ -268,7 +293,7 @@ impl App {
     }
 
     async fn session_id(&self, room: &str, to: &str) -> anyhow::Result<String> {
-        let rooms = self.net.rooms.lock().await;
+        let rooms = self.n().rooms.lock().await;
         let r = rooms.get(room).ok_or_else(|| anyhow!("not in room {room}"))?;
         let hits: Vec<_> = r.peers.values().filter(|p| p.member.session_id.starts_with(to) || p.member.name == to).collect();
         match hits.as_slice() {
@@ -283,61 +308,64 @@ impl App {
             env.to = Some(self.session_id(&env.room, t).await?);
         }
         store::journal(journal_entry("out", &env, &[], false));
-        let n = self.net.send(&env).await?;
+        let n = self.n().send(&env).await?;
         Ok(format!("sent {} {} to {n} session(s)", env.kind, env.id))
     }
 
     async fn call(&self, name: &str, a: &Value) -> anyhow::Result<String> {
         let s = |k: &str| a[k].as_str().unwrap_or("").to_string();
+        if !matches!(name, "inbox" | "perm" | "journal") {
+            self.net().await?;
+        }
         match name {
             "whoami" => Ok(serde_json::to_string_pretty(&json!({
-                "name": self.net.me.name, "session_id": self.net.me.session_id, "pc": self.net.me.pc_name, "pc_id": self.net.me.pc_id,
+                "name": self.n().me.name, "session_id": self.n().me.session_id, "pc": self.n().me.pc_name, "pc_id": self.n().me.pc_id,
                 "journal": store::journal_enabled(), "approval_dialogs": self.can_elicit.load(Ordering::Relaxed),
             }))?),
             "room_create" => {
-                let name = Some(s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{}-room", self.net.me.name));
-                let t = self.net.create(&name).await?.encode();
+                let name = Some(s("name")).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("{}-room", self.n().me.name));
+                let t = self.n().create(&name).await?.encode();
                 let copied = copy_to_clipboard(&t);
                 Ok(format!("Room {name} created.{} Share this ticket with the other person:\n\n{t}", if copied { " Ticket copied to the clipboard." } else { "" }))
             }
             "room_ticket" => {
                 let room = self.room_id(&a["room"]).await?;
-                let t = self.net.ticket(&room).await?.encode();
+                let t = self.n().ticket(&room).await?.encode();
                 copy_to_clipboard(&t);
                 Ok(t)
             }
             "room_join" => {
                 let t = Ticket::decode(&s("ticket"))?;
-                self.net.join(&t.room, &t.name, &t.secret, vec![t.host]).await
+                self.n().join(&t.room, &t.name, &t.secret, vec![t.host]).await
             }
             "room_rejoin" => {
                 let q = s("room");
                 let rooms = store::load_rooms();
                 let (id, rec) = rooms.iter().find(|(id, r)| id.as_str() == q || r.name == q).ok_or_else(|| anyhow!("no room {q} in history"))?;
                 let via = rec.members.iter().map(|(_, a)| a.clone()).collect();
-                match self.net.join(id, &rec.name, &rec.secret, via).await {
+                match self.n().join(id, &rec.name, &rec.secret, via).await {
                     Ok(msg) => Ok(msg),
                     Err(e) => Ok(format!("Back in room {} but nobody is reachable right now ({e:#}). Members who come back can rejoin through this session.", rec.name)),
                 }
             }
             "room_leave" => {
                 let room = self.room_id(&a["room"]).await?;
-                self.net.leave(&room).await?;
+                self.n().leave(&room).await?;
                 Ok(format!("left {room}"))
             }
             "rooms" => {
-                let active = self.net.rooms.lock().await;
+                let active = self.n().rooms.lock().await;
                 let now: Vec<_> = active.iter().map(|(id, r)| json!({"room": id, "name": r.name, "others": r.peers.len()})).collect();
                 let history: Vec<_> = store::load_rooms()
                     .into_iter()
-                    .filter(|(id, r)| r.session == self.net.me.name && !active.contains_key(id))
+                    .filter(|(id, r)| r.session == self.n().me.name && !active.contains_key(id))
                     .map(|(id, r)| json!({"room": id, "name": r.name, "members": r.members.iter().map(|(m, _)| m.name.clone()).collect::<Vec<_>>(), "last_seen": r.last_seen}))
                     .collect();
                 Ok(serde_json::to_string_pretty(&json!({"active": now, "history_rejoinable": history}))?)
             }
             "peers" => {
                 let perms = store::load_peers();
-                let rooms = self.net.rooms.lock().await;
+                let rooms = self.n().rooms.lock().await;
                 let out: Vec<_> = rooms
                     .iter()
                     .map(|(id, r)| {
@@ -361,7 +389,7 @@ impl App {
                 env.reply_to = Some(s("reply_to")).filter(|t| !t.is_empty());
                 let mut total = 0;
                 for p in a["files"].as_array().into_iter().flatten().filter_map(Value::as_str) {
-                    let bytes = std::fs::read(p).with_context(|| format!("reading {p}"))?;
+                    let bytes = std::fs::read(inside_project(p)?).with_context(|| format!("reading {p}"))?;
                     total += bytes.len();
                     if total > MAX_FILES {
                         anyhow::bail!("attachments over 25 MB; share big files through the repo instead");
@@ -372,11 +400,11 @@ impl App {
                 self.deliver(env, &a["to"]).await
             }
             "set_status" => {
-                let rooms: Vec<String> = self.net.rooms.lock().await.keys().cloned().collect();
+                let rooms: Vec<String> = self.n().rooms.lock().await.keys().cloned().collect();
                 for room in &rooms {
                     let env = self.envelope(room, "status", s("text"));
                     store::journal(journal_entry("out", &env, &[], false));
-                    self.net.send(&env).await?;
+                    self.n().send(&env).await?;
                 }
                 Ok(format!("status shared with {} room(s)", rooms.len()))
             }
@@ -434,6 +462,17 @@ impl App {
             _ => anyhow::bail!("unknown tool {name}"),
         }
     }
+}
+
+/// Attachments may only come from inside the project, so a peer can't talk Claude into
+/// sending files from elsewhere on this machine.
+fn inside_project(p: &str) -> anyhow::Result<std::path::PathBuf> {
+    let root = store::project_dir().canonicalize()?;
+    let path = root.join(p).canonicalize().with_context(|| format!("no such file {p}"))?;
+    if !path.starts_with(&root) {
+        anyhow::bail!("{p} is outside the project ({}); only project files can be attached", store::project_dir().display());
+    }
+    Ok(path)
 }
 
 fn short(id: &str) -> &str {
@@ -500,7 +539,7 @@ fn tools() -> Value {
         {"name": "room_leave", "description": "Leave a room", "inputSchema": obj(json!({"room": room}), &[])},
         {"name": "rooms", "description": "Active rooms and rejoinable history", "inputSchema": obj(json!({}), &[])},
         {"name": "peers", "description": "Sessions in your rooms: name, machine, live status, direct or relayed link, and the permissions you gave them", "inputSchema": obj(json!({}), &[])},
-        {"name": "send", "description": "Send to the whole room or one session. kind: text, image, context, memory, change, result, custom (with topic, for plugins). files: local paths to attach (25 MB total)", "inputSchema": obj(json!({
+        {"name": "send", "description": "Send to the whole room or one session. kind: text, image, context, memory, change, result, custom (with topic, for plugins). files: paths inside this project to attach (25 MB total)", "inputSchema": obj(json!({
             "text": {"type": "string"}, "kind": {"type": "string", "enum": KINDS}, "to": {"type": "string", "description": "Session name or id; omit for the whole room"},
             "room": room, "files": files, "topic": {"type": "string"}, "reply_to": {"type": "string"}}), &["text"])},
         {"name": "set_status", "description": "Share what this session is doing now with every room", "inputSchema": obj(json!({"text": {"type": "string"}}), &["text"])},
