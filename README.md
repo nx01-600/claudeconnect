@@ -58,6 +58,14 @@ ready", "delegate the migration to ana-backend"), or use the commands:
 | `/connect:perm <request>` | change what a peer may do |
 | `/connect:leave [name]` | leave a room |
 
+## Status line and machine name
+
+Every running session writes a heartbeat to `~/.claudeconnect/live/<session>.json` every 5 seconds
+(`name`, `project`, `channel`, `rooms`, `ts`), so a status line can show whether claudeconnect is
+active and whether messages are pushed live (`channel: true`). Treat files older than 15 seconds as gone.
+
+Peers see your machine by its hostname. Change it with `claudeconnect pc-name "Nico desktop"`.
+
 ## Permissions
 
 Each peer gets its own settings, stored per machine in `~/.claudeconnect/peers.json`:

@@ -61,6 +61,21 @@ pub struct Identity {
     _lock: File,
 }
 
+/// The machine name shown to peers: `~/.claudeconnect/machine.name` if set, else the hostname.
+pub fn pc_name() -> String {
+    fs::read_to_string(home().join("machine.name"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).ok())
+        .unwrap_or_else(|| "pc".into())
+}
+
+pub fn set_pc_name(name: &str) -> anyhow::Result<()> {
+    fs::create_dir_all(home())?;
+    Ok(fs::write(home().join("machine.name"), name.trim())?)
+}
+
 pub fn load_identity() -> anyhow::Result<Identity> {
     let home = home();
     fs::create_dir_all(home.join("sessions"))?;
@@ -74,10 +89,12 @@ pub fn load_identity() -> anyhow::Result<Identity> {
             id
         }
     };
-    let pc_name = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "pc".into());
+    let pc_name = pc_name();
     let project = project_dir();
     let folder = project.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_else(|| "session".into());
-    let base = std::env::var("CLAUDECONNECT_NAME").unwrap_or_else(|_| format!("{}-{}", pc_name.to_lowercase(), folder));
+    // Default name uses the hostname, not the editable pc name, so renaming the pc keeps the identity.
+    let host = std::env::var("COMPUTERNAME").or_else(|_| std::env::var("HOSTNAME")).unwrap_or_else(|_| "pc".into());
+    let base = std::env::var("CLAUDECONNECT_NAME").unwrap_or_else(|_| format!("{}-{}", host.to_lowercase(), folder));
     let project_hash = format!("{:08x}", fnv(&project.to_string_lossy()) as u32);
 
     // Same name + project = same identity across restarts, so rooms can be rejoined.
@@ -222,6 +239,12 @@ pub fn save_room(id: &str, rec: RoomRecord) -> anyhow::Result<()> {
     let mut rooms = load_rooms();
     rooms.insert(id.to_string(), rec);
     write_json(&home().join("rooms.json"), &rooms)
+}
+
+/// Heartbeat file other tools (like a status line) read to show this session's state.
+pub fn write_live(name: &str, v: &Value) {
+    let path = home().join("live").join(format!("{}.json", slug(name)));
+    let _ = write_json(&path, v);
 }
 
 // ---------- project journal ----------

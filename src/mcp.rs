@@ -50,6 +50,19 @@ pub async fn run() -> anyhow::Result<()> {
         inbox: Default::default(),
     };
 
+    // ponytail: 5 s heartbeat instead of writing on every room change; readers treat >15 s as gone.
+    let hb = app.clone();
+    tokio::spawn(async move {
+        let channel = std::env::var("CLAUDECONNECT_CHANNEL").is_ok();
+        let project = store::project_dir().to_string_lossy().to_string();
+        loop {
+            let rooms: Vec<Value> = hb.net.rooms.lock().await.values().map(|r| json!({"name": r.name, "peers": r.peers.len()})).collect();
+            let v = json!({"name": hb.net.me.name, "project": project, "channel": channel, "rooms": rooms, "ts": store::now()});
+            store::write_live(&hb.net.me.name, &v);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+
     let ev = app.clone();
     tokio::spawn(async move {
         while let Some(e) = events.recv().await {

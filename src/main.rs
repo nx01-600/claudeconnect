@@ -14,6 +14,7 @@ USAGE:
   claudeconnect peers                list known peers and their permissions
   claudeconnect perm <peer> k=v...   set receive=on|off trust=trusted|untrusted delegate=off|manual|auto topics=a,b
   claudeconnect rooms                room history
+  claudeconnect pc-name [name]       show or set the machine name peers see
   claudeconnect mcp                  run the MCP server (Claude Code does this for you)";
 
 const COMMANDS: &[(&str, &str)] = &[
@@ -52,6 +53,15 @@ async fn main() -> anyhow::Result<()> {
             println!("{}: receive={} trust={:?} delegate={:?}", p.name, p.receive, p.trust, p.effective_delegate());
             store::save_peers(&peers)
         }
+        Some("pc-name") => {
+            if let Some(name) = args.get(1) {
+                store::set_pc_name(name)?;
+                println!("This machine is now shown as {name}. Restart Claude Code sessions to apply.");
+            } else {
+                println!("{}", store::pc_name());
+            }
+            Ok(())
+        }
         Some("rooms") => {
             for (id, r) in store::load_rooms() {
                 let names: Vec<_> = r.members.iter().map(|(m, _)| m.name.as_str()).collect();
@@ -69,6 +79,8 @@ async fn main() -> anyhow::Result<()> {
 /// Start `claude` with the development-channel flag that lets claudeconnect push messages in.
 fn launch(args: &[String]) -> anyhow::Result<()> {
     let mut cmd = Command::new("claude");
+    // Inherited by the MCP server, so it knows messages can be pushed into this session.
+    cmd.env("CLAUDECONNECT_CHANNEL", "1");
     let mut rest = args;
     if let [flag, name, tail @ ..] = args {
         if flag == "--name" {
