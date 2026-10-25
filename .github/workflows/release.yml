@@ -19,7 +19,8 @@ jobs:
           - os: macos-latest
             target: aarch64-apple-darwin
             asset: claudeconnect-macos-aarch64
-          - os: macos-13
+          # Intel Macs are cross-compiled on Apple Silicon; GitHub's Intel runners are retired.
+          - os: macos-latest
             target: x86_64-apple-darwin
             asset: claudeconnect-macos-x86_64
           - os: ubuntu-latest
@@ -31,7 +32,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo test --release --target ${{ matrix.target }}
+      - run: cargo test --release
       - run: cargo build --release --target ${{ matrix.target }}
       - name: Rename binary
         shell: bash
