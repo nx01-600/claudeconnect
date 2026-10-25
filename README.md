@@ -25,7 +25,7 @@ permissions.
 Requires [Rust](https://rustup.rs) and Claude Code.
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/nx01-600/claudeconnect
 claudeconnect install
 ```
 
@@ -88,3 +88,7 @@ ticket carries the room id, a secret, and the host's address. Joining sessions p
 receive the member list, and open a direct QUIC connection to every member. Messages are JSON
 envelopes (`text`, `image`, `context`, `memory`, `status`, `warning`, `change`, `delegate`,
 `result`, `custom` + `topic`) with inline attachments up to 25 MB.
+
+## License
+
+MIT
