@@ -551,25 +551,57 @@ fn tools() -> Value {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     let room = json!({"type": "string", "description": "Room name or id; optional when in a single room"});
     let files = json!({"type": "array", "items": {"type": "string"}});
+    // Each hint describes the tool's own effect; the lazy network start in `call` is not counted.
+    // openWorld is true when the tool reaches remote peers or returns text they wrote.
+    let hints = |title: &str, read_only: bool, destructive: bool, idempotent: bool, open_world: bool| {
+        json!({"title": title, "readOnlyHint": read_only, "destructiveHint": destructive, "idempotentHint": idempotent, "openWorldHint": open_world})
+    };
     json!([
-        {"name": "whoami", "description": "This session's claudeconnect name, id and machine", "inputSchema": obj(json!({}), &[])},
-        {"name": "room_create", "description": "Create a room and get a ticket to share with other sessions (also copied to the clipboard)", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
-        {"name": "room_ticket", "description": "Get the ticket of a room you're in, to invite more sessions", "inputSchema": obj(json!({"room": room}), &[])},
-        {"name": "room_join", "description": "Join a room with a ticket (starts with cc1)", "inputSchema": obj(json!({"ticket": {"type": "string"}}), &["ticket"])},
-        {"name": "room_rejoin", "description": "Rejoin a room from this session's history", "inputSchema": obj(json!({"room": {"type": "string"}}), &["room"])},
-        {"name": "room_leave", "description": "Leave a room", "inputSchema": obj(json!({"room": room}), &[])},
-        {"name": "rooms", "description": "Active rooms and rejoinable history", "inputSchema": obj(json!({}), &[])},
-        {"name": "peers", "description": "Sessions in your rooms: name, machine, live status, direct or relayed link, and the permissions you gave them", "inputSchema": obj(json!({}), &[])},
-        {"name": "send", "description": "Send to the whole room or one session. kind: text, image, context, memory, change, result, custom (with topic, for plugins). files: paths inside this project to attach (25 MB total)", "inputSchema": obj(json!({
+        {"name": "whoami", "annotations": hints("Who am I", true, false, true, false), "description": "This session's claudeconnect name, id and machine", "inputSchema": obj(json!({}), &[])},
+        {"name": "room_create", "annotations": hints("Create room", false, false, false, false), "description": "Create a room and get a ticket to share with other sessions (also copied to the clipboard)", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
+        {"name": "room_ticket", "annotations": hints("Get room ticket", false, false, true, false), "description": "Get the ticket of a room you're in, to invite more sessions", "inputSchema": obj(json!({"room": room}), &[])},
+        {"name": "room_join", "annotations": hints("Join room", false, false, false, true), "description": "Join a room with a ticket (starts with cc1)", "inputSchema": obj(json!({"ticket": {"type": "string"}}), &["ticket"])},
+        {"name": "room_rejoin", "annotations": hints("Rejoin room", false, false, false, true), "description": "Rejoin a room from this session's history", "inputSchema": obj(json!({"room": {"type": "string"}}), &["room"])},
+        {"name": "room_leave", "annotations": hints("Leave room", false, false, true, true), "description": "Leave a room", "inputSchema": obj(json!({"room": room}), &[])},
+        {"name": "rooms", "annotations": hints("List rooms", true, false, true, true), "description": "Active rooms and rejoinable history", "inputSchema": obj(json!({}), &[])},
+        {"name": "peers", "annotations": hints("List peers", true, false, true, true), "description": "Sessions in your rooms: name, machine, live status, direct or relayed link, and the permissions you gave them", "inputSchema": obj(json!({}), &[])},
+        {"name": "send", "annotations": hints("Send message", false, false, false, true), "description": "Send to the whole room or one session. kind: text, image, context, memory, change, result, custom (with topic, for plugins). files: paths inside this project to attach (25 MB total)", "inputSchema": obj(json!({
             "to": {"type": "string", "description": "Session name or id; omit for the whole room"}, "kind": {"type": "string", "enum": KINDS},
             "room": room, "files": files, "topic": {"type": "string"}, "reply_to": {"type": "string"}, "text": {"type": "string"}}), &["text"])},
-        {"name": "set_status", "description": "Share what this session is doing now with every room", "inputSchema": obj(json!({"text": {"type": "string"}}), &["text"])},
-        {"name": "warn", "description": "Heads-up to the room that you're changing these files, so others wait for your result. Advice, not a lock", "inputSchema": obj(json!({"files": files, "room": room, "text": {"type": "string"}}), &["files"])},
-        {"name": "delegate", "description": "Ask another session to run a task on its own machine with its own agent. It may need its user's approval", "inputSchema": obj(json!({"to": {"type": "string"}, "room": room, "task": {"type": "string"}}), &["to", "task"])},
-        {"name": "inbox", "description": "Recent incoming messages (fallback when they don't arrive on their own)", "inputSchema": obj(json!({"limit": {"type": "integer"}}), &[])},
-        {"name": "perm", "description": "Change what a peer may do here. Lowering is immediate; raising asks the user in a dialog", "inputSchema": obj(json!({
+        {"name": "set_status", "annotations": hints("Set status", false, false, true, true), "description": "Share what this session is doing now with every room", "inputSchema": obj(json!({"text": {"type": "string"}}), &["text"])},
+        {"name": "warn", "annotations": hints("Warn about file changes", false, false, false, true), "description": "Heads-up to the room that you're changing these files, so others wait for your result. Advice, not a lock", "inputSchema": obj(json!({"files": files, "room": room, "text": {"type": "string"}}), &["files"])},
+        {"name": "delegate", "annotations": hints("Delegate task", false, true, false, true), "description": "Ask another session to run a task on its own machine with its own agent. It may need its user's approval", "inputSchema": obj(json!({"to": {"type": "string"}, "room": room, "task": {"type": "string"}}), &["to", "task"])},
+        {"name": "inbox", "annotations": hints("Read inbox", true, false, true, true), "description": "Recent incoming messages (fallback when they don't arrive on their own)", "inputSchema": obj(json!({"limit": {"type": "integer"}}), &[])},
+        {"name": "perm", "annotations": hints("Change peer permissions", false, true, true, false), "description": "Change what a peer may do here. Lowering is immediate; raising asks the user in a dialog", "inputSchema": obj(json!({
             "peer": {"type": "string"}, "receive": {"type": "boolean"}, "trust": {"type": "string", "enum": ["trusted", "untrusted"]},
             "delegate": {"type": "string", "enum": ["off", "manual", "auto"]}, "topics": files}), &["peer"])},
-        {"name": "journal", "description": "Turn the project journal (.claudeconnect/journal.jsonl) on or off", "inputSchema": obj(json!({"on": {"type": "boolean"}}), &["on"])},
+        {"name": "journal", "annotations": hints("Toggle journal", false, false, true, false), "description": "Turn the project journal (.claudeconnect/journal.jsonl) on or off", "inputSchema": obj(json!({"on": {"type": "boolean"}}), &["on"])},
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn with_hint(hint: &str) -> Vec<String> {
+        tools().as_array().unwrap().iter().filter(|t| t["annotations"][hint] == true).map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn every_tool_declares_all_hints() {
+        let tools = tools();
+        assert_eq!(tools.as_array().unwrap().len(), 15);
+        for t in tools.as_array().unwrap() {
+            assert!(t["annotations"]["title"].is_string(), "{}", t["name"]);
+            for hint in ["readOnlyHint", "destructiveHint", "idempotentHint", "openWorldHint"] {
+                assert!(t["annotations"][hint].is_boolean(), "{} lacks {hint}", t["name"]);
+            }
+        }
+    }
+
+    #[test]
+    fn hints_match_what_the_tools_do() {
+        assert_eq!(with_hint("readOnlyHint"), ["whoami", "rooms", "peers", "inbox"]);
+        assert_eq!(with_hint("destructiveHint"), ["delegate", "perm"]);
+    }
 }
